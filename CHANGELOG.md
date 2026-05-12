@@ -6,6 +6,28 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Added
+- **New command: `/investigate`**. Structured investigation of failures (compile errors, runtime errors, test failures, broken CI, production incidents). Produces an investigation file under `investigations/` capturing observed symptoms, reproduction steps, hypotheses, ruled-out causes, evidence, and the root cause once found. The investigation file feeds into `/fix` via the new `--from-investigation` flag.
+- **`/fix --from-investigation <file>` flag.** Pre-populates the fix file's "What was wrong" and "Root cause" sections from a completed investigation. Refuses to run if the investigation status is not `root-cause-identified`.
+- **`/work` iteration discipline for compile/test failures.** Explicit guidance: iterate up to ~3 attempts with different hypotheses, then stop and escalate. Never disable tests, skip assertions, or relax invariants to make failures pass.
+- **Pre-commit hook accepts `investigations/*.md` linkage** in addition to `specs/` and `fixes/`. A commit that touches `src/` and stages an investigation file passes the Wall.
+- **New directory: `investigations/`**. Created by `install.sh`. Verified by the 6-scenario hook test in CI.
+
+### Why this addition
+Runtime errors and broken builds are the most common bug shape, and the previous workflow had no first-class place for the *investigation phase*. `/fix` required a known root cause, but most bugs start unknown. Without `/investigate`, the discovery phase lived in Slack threads and got lost. The trigger for adding this command: every real bug fix in practice starts with an investigation that the workflow previously hid.
+
+### Added (previous)
+- **New skill: `spec-reverse-engineer`**. Produces attest spec files from existing material: source code (Python, Java, TypeScript, others), OpenAPI/AsyncAPI definitions, BDD `.feature` files, Confluence/Notion-style design docs, or specs from other frameworks (GitHub Spec Kit, BMAD, Kiro, Tessl). Designed for adoption on existing codebases — most users don't start greenfield.
+- Three reference files for the new skill: `from-code.md` (per-language extraction rules), `from-docs.md` (source-format migration tables), `examples.md` (three worked migrations: Spring Boot + tests, OpenAPI YAML, Confluence-style design doc).
+- New spec status: `draft-reverse-engineered`. Distinct from `draft` to prevent accidentally running `/work` or `/contract` against an unreviewed reverse-engineered spec.
+- README section: "Adopting attest on an existing codebase".
+
+### Changed
+- `install.sh` now installs both skills (`claude-md-architect` and `spec-reverse-engineer`) under `~/.claude/skills/`, plus the six commands (including the new `/investigate`).
+- `sync-local.sh` and `verify-sync.sh` updated for the second skill and the new command.
+- CI line-count check loops over both skills.
+- Pre-commit hook updated for 6-scenario coverage (spec, fix, investigation, no-linkage, ref-in-code, bypass).
+
 ### Changed
 - **Renamed project** from `two-commander` to `attest`. The old name was baggage from the source paper (the Two-Commander blog post) that proposed two human roles managing an agent fleet. That framing turned out to be rhetorical — what the workflow actually does is *attest*: every artifact (spec, contract, fix, §ref, commit) carries an attestation of something. The new name reflects the mechanism, not the metaphor.
 - Updated all user-facing references (README, install messages, skill docstrings, template names) to use `attest`. Historical attribution to the Two-Commander source paper is preserved in the README's "Why this design, and what it isn't" section.

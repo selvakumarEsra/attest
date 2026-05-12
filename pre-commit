@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: traceability enforcement (the Wall)
+#
+# Rule: if this commit touches files under src/, then ONE of:
+#   (a) a file under specs/ is also staged in this commit, OR
+#   (b) a file under fixes/ is also staged in this commit, OR
+#   (c) a file under investigations/ is also staged in this commit, OR
+#   (d) the commit message references a spec, fix, or investigation
+#       by path or §ref, OR
+#   (e) a §ref:specs/..., §ref:fixes/..., or §ref:investigations/...
+#       comment is added in this commit's code.
+#
+# Install:
+#   cp pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# Bypass (sparingly, leaves audit trail in git log):
+#   git commit --no-verify
+#
+# Tune the SRC_PATTERN below if your repo layout differs.
+
+set -euo pipefail
+
+SRC_PATTERN='^(src|lib|app)/'
+SPEC_PATTERN='^specs/'
+FIX_PATTERN='^fixes/'
+INVESTIGATION_PATTERN='^investigations/'
+COMMIT_MSG_FILE="${1:-}"  # populated when called as commit-msg hook
+
+# Get the list of staged files (added, copied, modified, renamed)
+staged_files=$(git diff --cached --name-only --diff-filter=ACMR || true)
+
+if [[ -z "$staged_files" ]]; then
+    exit 0
+fi
+
+# Check whether any src/ files are being committed
+src_changed=$(echo "$staged_files" | grep -E "$SRC_PATTERN" || true)
+
+if [[ -z "$src_changed" ]]; then
+    # No production code changing; nothing to enforce.
+    exit 0
+fi
+
+# A src/ change is happening. Check for spec, fix, or investigation linkage.
+spec_staged=$(echo "$staged_files" | grep -E "$SPEC_PATTERN" || true)
+fix_staged=$(echo "$staged_files" | grep -E "$FIX_PATTERN" || true)
+investigation_staged=$(echo "$staged_files" | grep -E "$INVESTIGATION_PATTERN" || true)
+
+if [[ -n "$spec_staged" || -n "$fix_staged" || -n "$investigation_staged" ]]; then
+    exit 0
+fi
+
+# Look at the commit message for a spec, fix, or investigation reference.
+ref_in_msg=""
+if [[ -n "$COMMIT_MSG_FILE" && -f "$COMMIT_MSG_FILE" ]]; then
+    if grep -qE '(specs|fixes|investigations)/[a-zA-Z0-9._/-]+\.md|§ref:(specs|fixes|investigations)/' "$COMMIT_MSG_FILE"; then
+        ref_in_msg="yes"
+    fi
+fi
+
+if [[ -n "$ref_in_msg" ]]; then
+    exit 0
+fi
+
+# Last resort: check if any staged src/ file's diff contains a §ref:specs/,
+# §ref:fixes/, or §ref:investigations/ comment.
+if echo "$staged_files" | grep -E "$SRC_PATTERN" | while read -r f; do
+    if git diff --cached "$f" | grep -qE '\+.*§ref:(specs|fixes|investigations)/'; then
+        echo "found"
+        break
+    fi
+done | grep -q "found"; then
+    exit 0
+fi
+
+# No linkage anywhere. Block.
+cat <<EOF >&2
+
+╔══════════════════════════════════════════════════════════════════╗
+║  COMMIT BLOCKED — no spec, fix, or investigation linkage found    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+This commit touches production code (matching $SRC_PATTERN) but does
+not link to a spec, fix, or investigation. The Wall requires that
+production changes carry traceability.
+
+To satisfy this hook, do one of:
+
+  1. Stage a spec, fix, or investigation in this commit:
+       git add specs/YYYY-MM-DD-your-slug.md
+       (or)
+       git add fixes/YYYY-MM-DD-your-slug-against-X.md
+       (or)
+       git add investigations/YYYY-MM-DD-your-slug.md
+
+  2. Reference one in the commit message:
+       git commit -m "fix: handle null preferences
+
+       §ref:fixes/2026-05-12-null-prefs-against-notif-prefs.md"
+
+  3. Add a §ref:specs/, §ref:fixes/, or §ref:investigations/ comment
+     in the code.
+
+For genuine non-traceable changes (formatting, dependency bumps,
+emergency hotfix), bypass deliberately:
+
+       git commit --no-verify
+
+Bypasses are visible in the audit trail. Use them honestly.
+
+EOF
+exit 1

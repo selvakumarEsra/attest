@@ -56,9 +56,9 @@ attest/
 ├── .gitignore
 │
 ├── dist/                         ← source of truth — install into other repos
-│   ├── commands/                 ←   the five slash commands
+│   ├── commands/                 ←   the six slash commands
 │   ├── hooks/                    ←   pre-commit hook
-│   ├── skill/                    ←   claude-md-architect skill
+│   ├── skill/                    ←   two skills
 │   └── templates/                ←   CLAUDE.md template
 │
 ├── .claude/                      ← generated copy for self-hosting (sync'd from dist/)
@@ -68,7 +68,7 @@ attest/
 ├── docs/
 │   └── bug-fix-workflow.md       ← worked examples of the four bug-fix cases
 │
-├── examples/                     ← example specs and fixes (coming)
+├── examples/                     ← example specs and fixes
 │
 ├── scripts/
 │   ├── install.sh                ← install into a target repo
@@ -80,7 +80,31 @@ attest/
     └── CONTRIBUTING.md
 ```
 
-## The five commands
+## Handling failures (compile errors, runtime errors, broken CI)
+
+Failures take several shapes. The workflow handles each differently:
+
+| Situation | Approach |
+|---|---|
+| Compile error in code Claude wrote during `/work` | `/work` iterates up to ~3 attempts on the same failure, with different hypotheses each time. After that, it stops and asks the user. Don't disable tests or relax invariants to make failures pass. |
+| Compile error in code outside `/work`, trivial (typo, missing import) | Just fix it; commit with `--no-verify` if there's no spec to reference. The audit trail captures bypasses in git log. |
+| Runtime error you've observed but don't know the cause of | `/investigate` — captures evidence, hypotheses, what you ruled out, and the root cause once found. Then `/fix --from-investigation` pre-populates the fix with what you learned. |
+| Production incident | `/investigate --production` — same flow with the audit bar raised. Combine with your normal incident response process. |
+| Broken CI you suspect is environmental (not your code) | `/investigate` and conclude with `closed-external` once you've confirmed. No fix needed; the investigation is the audit trail of "we looked and it wasn't us". |
+| Bug you know the cause of immediately | Skip `/investigate`, go straight to `/fix`. The investigation is for unknowns. |
+
+### Why `/investigate` is separate from `/fix`
+
+`/fix` requires a known root cause — it refuses to draft a Resolution without one. That's correct discipline for verified bugs but unworkable for "something just broke and I don't know why yet". `/investigate` is the discovery phase; `/fix` is the resolution phase. Keeping them separate means:
+
+- The investigation has its own append-only log (you don't lose what you tried)
+- "Closed without fix" is a valid outcome (not reproducible, was environmental, etc.)
+- Multiple people can contribute to one investigation over time
+- When a similar failure recurs months later, you can search past investigations for the symptom
+
+In a regulated environment, the investigation record is often more important than the fix itself: it shows you investigated rather than guessed.
+
+## The six commands
 
 | Command | When to use |
 |---|---|
@@ -88,20 +112,55 @@ attest/
 | `/contract <spec>` | Compile a spec's Contract surface into `_generated/` artifacts (full-stack only) |
 | `/work <spec-or-fix> [--scope]` | Execute against a spec or fix file |
 | `/check <spec-or-fix> [--deep]` | Detect drift between a spec/fix and the code |
-| `/fix <ticket> --against <spec>` | Bug fix against an existing spec — four-case classification |
+| `/investigate <ticket>` | Investigate a failure (compile error, runtime error, broken CI, production incident) — produces an investigation file with evidence and root cause |
+| `/fix <ticket> --against <spec> [--from-investigation <inv>]` | Bug fix against an existing spec — four-case classification, can chain from `/investigate` |
 
-`/work` accepts either spec or fix files. `/check` is invoked automatically by `/work` and can also be run manually.
+`/work` accepts either spec or fix files. `/check` is invoked automatically by `/work` and can also be run manually. `/investigate` feeds into `/fix` via the `--from-investigation` flag.
 
-## The skill
+## Adopting attest on an existing codebase
 
-`claude-md-architect` writes or converts `CLAUDE.md` files. Four modes:
+Most adopters have thousands of lines of existing code and no specs. The path:
+
+1. **Install attest** with `./scripts/install.sh /path/to/your/repo`
+2. **Write your CLAUDE.md** using the `claude-md-architect` skill (or convert your existing one)
+3. **Backfill specs incrementally** using the `spec-reverse-engineer` skill, scoped to one module or endpoint at a time. Bulk reverse-engineering produces unreviewable output.
+4. **For new work**, use the standard `/spec → /work` (or `/spec → /contract → /work` for full-stack) loop.
+5. **For bugs in already-reverse-engineered code**, use `/fix`. The fix will reference the reverse-engineered spec.
+
+You don't need 100% spec coverage to benefit. The pre-commit hook only enforces spec-linkage on changed `src/` files. If a file hasn't been touched and has no spec, that's fine — it stays as it is. The discipline kicks in when you modify the file.
+
+What does NOT work:
+
+- Bulk auto-generation of specs for the whole codebase in one pass (the output is unreviewable; the skill will warn you)
+- Promoting reverse-engineered specs to `draft` without reviewing the `[needs review]` flags (the skill won't do this for you)
+- Trying to reverse-engineer pure refactors with no observable behaviour (skip these)
+
+See the `spec-reverse-engineer` skill's reference files for migration rules per source format.
+
+## The skills
+
+Two skills, both user-scoped — installed under `~/.claude/skills/` once, then available in every repo.
+
+### `claude-md-architect`
+
+Writes or converts `CLAUDE.md` files. Four modes:
 
 - **Greenfield** — write a new CLAUDE.md from scratch
 - **Conversion** — restructure an existing CLAUDE.md (or AGENTS.md) into the template
 - **Audit** — score a CLAUDE.md against the template; surface gaps
 - **Hierarchy** — design or refactor nested CLAUDE.md files for monorepos
 
-The skill is user-scoped — installed under `~/.claude/skills/` once, then available in every repo.
+### `spec-reverse-engineer`
+
+Reverse-engineers attest spec files from material that already exists: source code, existing documentation, OpenAPI definitions, BDD `.feature` files, or specs from other frameworks (Spec Kit, BMAD, Kiro, Tessl). For when you adopt attest on a codebase that already has thousands of files and no specs.
+
+Three scenarios:
+
+- **From code only** — reads source, extracts contract surface from type signatures and routes, extracts acceptance criteria from test assertions
+- **From existing docs** — migrates Confluence/Notion/OpenAPI/BDD content into attest's section shape
+- **Hybrid** — uses both signals, marks conflicts for human adjudication
+
+Honest about its limits: produces specs with status `draft-reverse-engineered`, marks uncertain sections `[needs review]`, never auto-promotes to `draft`. The user reviews and confirms before the spec is usable with `/work` or `/contract`.
 
 ## The Wall (pre-commit hook)
 
