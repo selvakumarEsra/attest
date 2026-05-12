@@ -4,7 +4,7 @@ A standalone workflow for AI-assisted development with [Claude Code](https://doc
 
 The name reflects what the workflow actually does: every artifact attests to something. A spec attests to intent. A contract attests to the API boundary. A fix attests to a bug and its resolution. A `§ref` comment attests that code traces to a spec. The pre-commit hook attests that nothing slips through without a paper trail. The hash mechanism attests that contracts haven't drifted.
 
-Five things: one constitution per repo, five slash commands, one git hook, one skill. That's the whole system.
+The whole system: one constitution per repo, nine slash commands, two skills, one pre-commit hook, an observability ledger, and a structural breaking-change detector.
 
 ## Quick start
 
@@ -22,26 +22,60 @@ cd attest
 
 The installer is idempotent — re-running it is safe. Use `--dry-run` to preview what it would change.
 
+## Scope — what attest is, and what it isn't
+
+attest is a **spec-driven development workflow** for AI-assisted coding in a single repository with Claude Code as the agent. It is not a platform, not a framework, not an agent fleet manager. To help you decide whether attest fits your need:
+
+| attest IS | attest IS NOT — use this instead |
+|---|---|
+| A spec/fix/investigation-driven workflow for Claude Code | A general agent framework — use LangGraph, CrewAI, or AutoGen for multi-agent orchestration outside Claude Code |
+| A pre-commit "Wall" that requires spec-or-fix linkage on `src/` changes | A code review tool — use GitHub PRs, Gerrit, Crucible |
+| A contract-integrity layer (hash + structural breaking-change detection on OpenAPI) | A contract registry / API gateway — use Apigee, Kong, or your in-house registry |
+| A local observability ledger (JSONL + SQLite) for command-level events | A full observability platform — use LangSmith, Arize Phoenix, or MLflow for production agent monitoring at scale |
+| A learning loop (`/encode-lesson`) that promotes investigation findings into CLAUDE.md invariants | An incident management system — use PagerDuty, Statuspage, your internal IR process |
+| Aligned with MAS AIRG / SR 11-7 documentation requirements | A complete AI risk governance program — those programs cover model approval, bias auditing, third-party assessments, customer-facing transparency |
+| Friendly to single-repo workflows | A monorepo build system — use Bazel, Pants, Nx, Turborepo |
+| Useful at small-to-medium team scale (1-30 engineers per repo) | A multi-tenant agent platform — different problem entirely |
+| A `/post-mortem` substrate (via `/investigate` + `/encode-lesson`) | A full post-mortem template — your team's incident review process is the right home for the prose narrative |
+
+If you need attest plus one of the right-column items, run both. attest is deliberately small in surface so it composes rather than competes.
+
 ## The workflow at a glance
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  New feature                                                     │
+│  New feature, single scope (backend OR frontend)                 │
 ├─────────────────────────────────────────────────────────────────┤
-│  /spec → /contract (full-stack only) → /work → git commit       │
+│  /spec → /work → /review-decisions → git commit                  │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│  Bug fix                                                         │
+│  New feature, full-stack (backend AND frontend)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  /fix → (optional /contract for spec changes) → /work → commit  │
+│  /spec → /ship → /review-decisions → review both subagents'     │
+│         work → 2× git commit                                     │
+│  (/ship runs /contract + parallel /work + /check internally)    │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│  Drift detection (anytime)                                       │
+│  Known bug                                                       │
 ├─────────────────────────────────────────────────────────────────┤
-│  /check                                                          │
+│  /fix → (optional /contract for spec changes) → /work →         │
+│        /review-decisions → commit                                │
 └─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Unknown failure (compile error, runtime error, broken CI)       │
+├─────────────────────────────────────────────────────────────────┤
+│  /investigate → /fix --from-investigation → /work → commit      │
+│  After the fix holds: /encode-lesson to promote invariant       │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Drift detection (anytime)        │  Ledger summary (anytime)    │
+├───────────────────────────────────┼──────────────────────────────┤
+│  /check                           │  attest_ledger.py summary    │
+└───────────────────────────────────┴──────────────────────────────┘
 ```
 
 Each command's full behaviour is documented in its own file under `dist/commands/`.
@@ -56,13 +90,17 @@ attest/
 ├── .gitignore
 │
 ├── dist/                         ← source of truth — install into other repos
-│   ├── commands/                 ←   the six slash commands
+│   ├── commands/                 ←   the eight slash commands
+│   ├── contract/                 ←   breaking-change detection helpers
 │   ├── hooks/                    ←   pre-commit hook
+│   ├── ledger/                   ←   observability ledger (Python + SQLite)
 │   ├── skill/                    ←   two skills
 │   └── templates/                ←   CLAUDE.md template
 │
 ├── .claude/                      ← generated copy for self-hosting (sync'd from dist/)
 │   ├── commands/
+│   ├── contract/
+│   ├── ledger/
 │   └── skills/
 │
 ├── docs/
@@ -104,18 +142,149 @@ Failures take several shapes. The workflow handles each differently:
 
 In a regulated environment, the investigation record is often more important than the fix itself: it shows you investigated rather than guessed.
 
-## The six commands
+## The nine commands
 
 | Command | When to use |
 |---|---|
 | `/spec <ticket>` | New feature, new requirement, or evolution of existing functionality |
-| `/contract <spec>` | Compile a spec's Contract surface into `_generated/` artifacts (full-stack only) |
-| `/work <spec-or-fix> [--scope]` | Execute against a spec or fix file |
+| `/contract <spec>` | Compile a spec's Contract surface into `_generated/` artifacts (full-stack only); detects structural breaking changes vs the previous compilation |
+| `/work <spec-or-fix> [--scope]` | Execute against a spec or fix file (single scope) |
+| `/ship <spec>` | Orchestrate a full-stack spec end-to-end: `/contract` then parallel backend + frontend `/work` via subagents, then `/check`. Saves the user from running four sessions manually. |
 | `/check <spec-or-fix> [--deep]` | Detect drift between a spec/fix and the code |
 | `/investigate <ticket>` | Investigate a failure (compile error, runtime error, broken CI, production incident) — produces an investigation file with evidence and root cause |
 | `/fix <ticket> --against <spec> [--from-investigation <inv>]` | Bug fix against an existing spec — four-case classification, can chain from `/investigate` |
+| `/encode-lesson <investigation> [--fix <fix>]` | Promote a lesson learned from a resolved investigation into a durable invariant in CLAUDE.md (or nested CLAUDE.md, skill gotchas, or command prompt). Closes the learning loop. |
+| `/review-decisions [<spec>] [--since DATE]` | Surface decisions Claude logged during `/work` for human review. Mark each as accepted, rejected, or needs-redo. Closes the human-in-loop gap. |
 
-`/work` accepts either spec or fix files. `/check` is invoked automatically by `/work` and can also be run manually. `/investigate` feeds into `/fix` via the `--from-investigation` flag.
+`/work` accepts either spec or fix files. `/check` is invoked automatically by `/work` and can also be run manually. `/investigate` feeds into `/fix` via the `--from-investigation` flag. `/ship` only handles full-stack specs; for single-scope work, run `/work` directly. `/encode-lesson` requires the investigation to have status `closed-resolved`. `/review-decisions` reads from the ledger — it requires `/work` (or another command) to have logged decisions first.
+
+## The observability ledger
+
+Every command logs to a local ledger so you can answer questions like "how many specs did we ship last quarter?", "how often did the pre-commit Wall block us?", "which acceptance criteria triggered the most drift?". Two storage layers:
+
+- **JSONL** at `.attest/ledger/events.jsonl` — source of truth, append-only, committed to git for audit
+- **SQLite** at `.attest/ledger/index.db` — derived query index, gitignored, rebuildable from the JSONL
+
+The ledger is queryable from the command line and exportable to CSV for dashboards:
+
+```bash
+# Human-readable summary
+python3 .attest/ledger/attest_ledger.py summary
+
+# Last 30 days only
+python3 .attest/ledger/attest_ledger.py summary --since 2026-04-12
+
+# Sessions by command and outcome
+python3 .attest/ledger/attest_ledger.py query "
+    SELECT command, outcome, COUNT(*) AS n
+    FROM sessions
+    GROUP BY command, outcome
+    ORDER BY n DESC
+"
+
+# Export to CSV for a BI tool
+python3 .attest/ledger/attest_ledger.py export-csv sessions.csv --table sessions
+```
+
+The full event schema and command-specific logging patterns are documented in `.attest/ledger/HOW-TO-LOG.md`. For the regulated-environment context, the JSONL ledger satisfies the AIRG "AI usage inventory" and "monitoring" requirements; commit it to git and the audit trail is portable across machines.
+
+## The decision log
+
+Every `/work` session may make choices the spec didn't dictate — picking one library over another, handling an edge case the spec was silent on, modifying a verification step. These choices are easy to miss in code review because they live inside diffs, not as explicit artifacts.
+
+attest captures these via `decision_logged` events in the ledger and provides `/review-decisions` as the human review affordance. The flow:
+
+```
+/work  →  logs each non-obvious choice as a decision_logged event
+        →  surfaces decisions in the post-flight summary
+
+/review-decisions  →  presents unreviewed decisions
+                   →  user marks each: accepted | rejected | needs-redo
+                   →  records decision_reviewed events back to the ledger
+```
+
+Three verdicts, with deliberate distinctions:
+
+- **accepted** — the choice was sound; record agreement and move on
+- **rejected** — the choice was wrong but the cost of redoing it exceeds the cost of accepting; the trail records disagreement but the code stands
+- **needs-redo** — the choice was wrong and must be fixed before merge; after `/review-decisions`, re-invoke `/work` with the override
+
+The original `decision_logged` events are append-only; verdicts are layered on top as `decision_reviewed` events. This means audits can answer "what did Claude decide?" *and* "what did the human think of it?" as separate questions with separate trails.
+
+```bash
+# Show decisions that haven't been reviewed yet
+python3 .attest/ledger/attest_ledger.py query "
+    SELECT artifact, summary, ts
+    FROM decisions WHERE review_verdict IS NULL ORDER BY ts DESC
+"
+
+# Show all rejections with the reviewer's reasoning
+python3 .attest/ledger/attest_ledger.py query "
+    SELECT artifact, summary, reviewer_note, reviewed_at
+    FROM decisions WHERE review_verdict = 'rejected'
+"
+```
+
+## The learning loop
+
+When `/investigate` finds a root cause and `/fix` ships a resolution, that's only half the value. The other half is making sure the same class of bug can't happen the same way again. `/encode-lesson` is the closure step: it promotes a lesson from an investigation into a durable invariant — a line in `CLAUDE.md` (or in a nested `CLAUDE.md`, or in a skill's gotchas, or in a slash command's prompt) that every future Claude session reads automatically.
+
+The flow is intentional:
+
+```
+/investigate  →  /fix --from-investigation  →  /work  →  ship  →  observe fix holds  →  /encode-lesson
+   ↑                                                                                          │
+   │                                                                                          ▼
+   └──── future bugs can no longer happen the same way: the invariant is on every read ────────┘
+```
+
+The command refuses to encode lessons from unresolved investigations, refuses motherhood statements ("write good tests"), refuses lessons that duplicate existing invariants, and refuses to add more than 3 lessons from one investigation. The discipline is high because invariants are read on every Claude session — bloat them and you slow the agent down.
+
+Each encoded lesson carries a stable ID and a linkback comment that points to the investigation it came from. The ledger logs `lesson_encoded` events into a `lessons` table:
+
+```bash
+python3 .attest/ledger/attest_ledger.py query "
+    SELECT lesson_id, destination_path, source_investigation
+    FROM lessons ORDER BY ts DESC
+"
+```
+
+This answers the auditor question: "show me every lesson your team has encoded into the system as a result of an investigation."
+
+## Contract integrity (hash + structural diff)
+
+Full-stack work hash-locks the API contract via two complementary mechanisms:
+
+**Hash-based drift detection** (the original):
+1. `/contract` computes a SHA-256 over the normalised "Contract surface" section of the spec
+2. That hash is stamped into every generated artifact's header
+3. `/work` recomputes and refuses to proceed if it doesn't match
+
+This catches *that* the contract changed.
+
+**Structural breaking-change detection** (new in v0.8.0):
+1. When `/contract` re-runs against a spec it's seen before, it diffs the previous OpenAPI artifact against the new one
+2. The diff is classified as additive (safe) or breaking (needs attention)
+3. Breaking changes require explicit user confirmation before artifacts are written
+
+This catches *what kind* of change was made.
+
+The structural check uses `oasdiff` if installed (gold-standard OpenAPI breaking-change detection across all OpenAPI 3.x semantics). If `oasdiff` isn't on PATH, a built-in Python fallback detects the most common breaking changes: removed endpoints, removed fields, type changes, new required fields, removed enum values, removed response statuses, required-parameter additions. The fallback is "good enough to refuse a silently breaking change"; the install script tells users how to install `oasdiff` for full coverage:
+
+```bash
+go install github.com/oasdiff/oasdiff@latest
+```
+
+The ledger records every breaking-change check in a `breaking_changes` table:
+
+```bash
+python3 .attest/ledger/attest_ledger.py query "
+    SELECT tool, breaking, findings_count, ts
+    FROM breaking_changes ORDER BY ts DESC LIMIT 10
+"
+```
+
+Over time, the ratio of breaking vs clean re-compilations indicates how often the team ships contract-breaking changes — useful signal for API stability retrospectives.
 
 ## Adopting attest on an existing codebase
 

@@ -1,11 +1,47 @@
 ---
 description: Execute work against a spec file OR a fix file. For full-stack specs/fixes, takes a --scope argument (backend or frontend) and stays within that scope. Runs drift detection on entry and exit, and Pact provider tests on backend completion if artifacts exist.
 argument-hint: <path-to-spec-or-fix-file> [--scope backend|frontend]
+recommended-model: opus  # sonnet | opus — see CLAUDE.md for guidance
 ---
 
 # /work — Execute Against a Spec or Fix
 
 You are executing work defined by either a spec file (`specs/*.md`) or a fix file (`fixes/*.md`). Both are contracts. You do not invent work that isn't in the input artifact; you do not skip work that is. For full-stack work, you operate within ONE scope per invocation.
+
+## Observability ledger
+
+This command logs to the attest ledger. Follow the patterns in `.attest/ledger/HOW-TO-LOG.md` — specifically the **"work command"** section. Logging is best-effort and silent. Generate a session UUID at the start and include the scope. Log drift_detected for each /check finding, verification_ran for each test invocation, and session_end with completion outcome. **If a parent_session_id was passed in $ARGUMENTS (i.e., this /work was spawned by /ship), include it in session_start so the ledger can correlate parent and child.**
+
+### When to log a `decision_logged` event
+
+Log a decision **every time** you made a choice the spec did not dictate AND a reasonable engineer might have chosen differently. The threshold is: *would a code reviewer want to see this choice flagged?*
+
+Concrete triggers — log a decision when:
+
+1. **You picked one library, framework, or pattern over alternatives.** Example: "Chose `jsonschema-rs` (Rust binding) over `jsonschema` (pure Python) for spec validation — 50× faster on our payload sizes, and we only use the strict subset."
+2. **You handled an edge case the spec was silent on.** Example: "Spec didn't specify behaviour on null email addresses; chose to skip the notification silently rather than raising. Rationale: matches the existing `/messages` endpoint's behaviour."
+3. **You modified or skipped a verification step from CLAUDE.md.** Example: "Skipped the `ruff check` step because the file is generated; verified with `mypy` only."
+4. **You diverged from a pattern used elsewhere in the codebase.** Example: "Used pydantic `model_validator` instead of `field_validator` because we need cross-field validation; existing code uses field-only validators throughout."
+
+**Do NOT** log a decision for:
+- Mechanical choices (naming a variable, choosing an import order)
+- Choices the spec's Acceptance criteria directly dictated
+- Verification commands explicitly listed in CLAUDE.md (those are policy, not decisions)
+- Stylistic choices the formatter would normalise anyway
+
+When in doubt, log it — over-logging is easier to filter than under-logging is to reconstruct. But if you find yourself logging more than ~5 decisions per spec, the spec was probably under-specified; flag that to the user in your post-flight summary.
+
+### Decision logging skeleton
+
+```bash
+DECISION_ID=$(python3 .attest/ledger/attest_ledger.py log decision_logged \
+    session_id="\"$SID\"" \
+    artifact="\"$SPEC_PATH\"" \
+    summary='"<one-sentence what was chosen>"' \
+    rationale='"<one-sentence why this option over alternatives>"' \
+    accepted=true --quiet)
+# DECISION_ID is captured so the post-flight summary can reference it
+```
 
 ## Inputs
 
@@ -187,6 +223,32 @@ Either way, the execution notes include:
 - If `ready-for-review` → suggest review and commit
 - If still `in-progress` → tell the user the other scope is outstanding and what to run
 - **Fix mode addition:** if the fix is `--hot` or status was `emergency`, surface any deferred follow-ups loudly (e.g. "regression test was added inline — confirm coverage in CR" or "monitoring alert not yet configured").
+
+**Decisions made this session.** If you logged any `decision_logged` events during this `/work` invocation, surface them in the post-flight summary. Format:
+
+```
+Decisions logged this session (N):
+  1. <summary> — rationale: <rationale>
+  2. <summary> — rationale: <rationale>
+  ...
+
+Review them before promoting the spec to signed-off:
+  /review-decisions <spec-path>
+```
+
+If N == 0, mention that explicitly:
+
+```
+No decisions logged this session — execution stayed within the spec's
+explicit boundaries.
+```
+
+This block is the discoverability bridge: it puts decisions in front of the user immediately, instead of relying on them remembering to run `/review-decisions` later. If decisions exceed 5, also flag that the spec was probably under-specified:
+
+```
+Note: N decisions is high. The spec was probably under-specified — consider
+tightening Acceptance criteria or Open questions before the next /work run.
+```
 
 ## What not to do
 

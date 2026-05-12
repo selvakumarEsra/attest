@@ -6,6 +6,106 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Added — v0.9.0 (human-in-loop review, model pinning, explicit scope)
+
+**Critique 4 closed: human-in-loop decision log.**
+
+- **New: `/review-decisions` command.** Surfaces decisions Claude logged during `/work` (and other commands) for human review. Lists recent unreviewed decisions, lets the user mark each as `accepted | rejected | needs-redo` with an optional free-text note, and records the verdict to the ledger.
+- **Extended `decisions` table** with four new columns: `review_verdict`, `reviewer_note`, `reviewed_at`, `reviewed_session`. The original `decision_logged` events remain append-only; verdicts are layered on top via `decision_reviewed` events. The audit trail captures both Claude's decisions and the human's reaction to them.
+- **New ledger event type `decision_reviewed`.** Indexer uses `INSERT…ON CONFLICT DO UPDATE` on `decision_id` to layer verdicts onto the original decision rows.
+- **`/work` tightened.** Decision-logging trigger now lists 4 concrete situations that demand a log (library/pattern choice, edge-case handling, verification step modification, divergence from codebase pattern) and 4 explicit non-triggers (mechanical choices, spec-dictated actions, CLAUDE.md-policy actions, formatter-normalised choices). Post-flight Step 6 now surfaces "decisions logged this session" inline, with a flag if the count exceeds 5 (signal that the spec was under-specified).
+- **Soft-reject design.** `rejected` and `needs-redo` are deliberately distinct. `rejected` records disagreement but the code stands. `needs-redo` requires the user to re-invoke `/work` with an override. The command does NOT auto-spawn `/work` on `needs-redo` verdicts.
+- **Summary output** now shows both Claude's original mark and the human review mark per decision, plus an aggregated "Decision reviews:" block.
+
+**Critique 10 closed: model-version pinning.**
+
+- **New `recommended-model` frontmatter field** on every slash command. Values: `sonnet` or `opus`. Advisory, not enforced — Claude Code uses whatever model the user has selected, but the field documents intent for regulated environments.
+- Per-command recommendations established: `/spec`, `/contract`, `/check`, `/review-decisions` recommend sonnet (textual + judgment work). `/work`, `/ship`, `/fix`, `/investigate`, `/encode-lesson` recommend opus (heavy execution, hypothesis generation, high-stakes abstraction).
+- **CLAUDE.md template** has a new "Recommended model" section explaining the convention and listing the per-command split. Self-hosted CLAUDE.md updated to match.
+- **NOT added: a model-regression eval suite.** That's premature — the right time to add evals is after empirical signal from real ticket use surfaces which commands are most model-sensitive. Building speculative evals before that is the failure mode the grilling document warned against.
+
+**Critique 11 closed: explicit scope statement.**
+
+- **New README section "Scope — what attest is, and what it isn't"** placed immediately after Quick Start. Table of 10 adjacent concerns with the canonical tool to use instead: LangGraph/CrewAI/AutoGen (general agent frameworks), GitHub/Gerrit (code review), Apigee/Kong (API gateways), LangSmith/Arize (full observability platforms), PagerDuty (incident management), Bazel/Nx (monorepo build), and others.
+- **Removed stale "five things" claim** from the README intro. The system is now nine commands, two skills, one pre-commit hook, observability ledger, and contract helpers — calling that "five things" was straightforwardly wrong.
+- The scope statement is structured to make scope-creep arguments fail cleanly: each adjacent concern names a real, well-known tool that does that job better than attest could.
+
+### Why now
+The grilling review identified these three critiques together because they share an asymmetric impact: each is small in code surface but large in adoption-readiness. Critique 4 makes audit trails complete (Claude's decisions + human verdicts). Critique 10 makes outputs reproducible under model upgrades. Critique 11 prevents the framework from being expected to do things it doesn't. All three reduce friction for the "do I trust this enough to deploy in production?" decision.
+
+### Migration from v0.8.x
+- Re-run `./scripts/install.sh /path/to/your/repo` to install the new command.
+- Existing decisions in the ledger gain four new nullable columns; running `rebuild-index` migrates cleanly.
+- The new frontmatter field is invisible to Claude Code's slash-command UI but documents intent. No behaviour change required from existing users.
+
+### Added — v0.8.0 (learning loop + structural contract integrity)
+
+**Critique 5 closed: closure loop from investigations to invariants.**
+
+- **New: `/encode-lesson` command.** Promotes a lesson learned from a resolved investigation into a durable invariant. Accepts an investigation file (status must be `closed-resolved`) and optionally a fix file. Extracts 1-3 candidate lessons, classifies each as architectural / module-specific / tooling / command-specific, proposes a destination (root CLAUDE.md, nested CLAUDE.md, skill gotchas, or command prompt), and after user approval inserts the invariant with a linkback comment.
+- Each encoded lesson carries a **stable lesson ID** (short hash of the lesson text) embedded in both the destination artifact and the ledger entry, so audit queries can trace any invariant back to the investigation it came from.
+- The investigation file gets a "Lesson encoded" section appended for bidirectional cross-reference.
+- New ledger table: `lessons (lesson_id, ts, session_id, destination_path, source_investigation, source_fix, lesson_text)`.
+- New event type: `lesson_encoded`.
+- Explicit anti-patterns the command refuses: motherhood statements, lessons from unresolved investigations, lessons duplicating existing invariants, lessons that would push CLAUDE.md past 200 lines, more than 3 lessons per investigation.
+- Summary output now includes a "Lessons encoded" section.
+
+**Critique 6 closed: structural breaking-change detection.**
+
+- **New: `dist/contract/breaking-change-check.sh`** — bash wrapper that uses `oasdiff` when available, falls back to a built-in Python detector when not. Outputs structured JSON describing whether changes are additive or breaking with line-by-line details.
+- **New: `dist/contract/breaking-change-fallback.py`** — built-in Python detector that catches the most common breaking changes: removed endpoints, removed fields, type changes, new required fields, removed enum values, removed response statuses, required-parameter additions. Verified against five OpenAPI diff scenarios.
+- **`/contract` command updated** to invoke the structural check on re-compile, replacing the previous manual-classification prose with a concrete tool invocation. The classification still drives the same decision (additive → proceed silently; breaking → require user confirmation), but now produced by tooling rather than judgement.
+- New ledger event type: `breaking_change_detected`, logged on every re-compile (both breaking and clean outcomes). Projects to a new `breaking_changes` table for time-series queries.
+- **install.sh** detects whether `oasdiff` is on PATH at install time and surfaces the recommendation to install it for full coverage. The fallback works without `oasdiff`; it's a graceful degradation, not a hard dependency.
+- Summary output now includes a "Breaking-change checks" section showing the breaking/clean ratio per tool.
+
+### Why now
+The grilling review identified these two critiques together because they share a structural property: **both close loops that attest previously left open.**
+- Critique 5: lessons learned from incidents previously stayed in retrospective notes and decayed. `/encode-lesson` makes them durable.
+- Critique 6: the hash mechanism detected *that* contracts changed but not *what kind*. The structural diff classifies the change semantically.
+
+Together they raise attest's compliance posture: an MAS AIRG examiner asking "show me how you learn from incidents" and "show me how you detect contract changes that affect consumers" now has concrete artefacts to inspect (the `lessons` table, the `breaking_changes` table) rather than relying on team assertions.
+
+### Migration from v0.7.x
+- Re-run `./scripts/install.sh /path/to/your/repo` to install the new command and contract helpers.
+- Install script will detect whether `oasdiff` is on PATH and warn if it isn't. The fallback works without it.
+- Existing specs, fixes, investigations, and ledger data are unaffected. The ledger schema gains two new tables; running `rebuild-index` migrates cleanly.
+
+### Added — v0.7.0 (observability + orchestration)
+
+**Critique 1 closed: observability ledger.**
+
+- **New: `.attest/ledger/` directory** with two storage layers:
+  - JSONL at `.attest/ledger/events.jsonl` — append-only source of truth, committed to git for audit portability
+  - SQLite at `.attest/ledger/index.db` — derived query index, gitignored, rebuildable at any time from the JSONL
+- **`attest_ledger.py`** CLI with five subcommands: `log` (append event), `rebuild-index` (regenerate SQLite from JSONL), `query <sql>` (run SQL against the index), `summary [--since DATE]` (human-readable digest), `export-csv <output.csv>` (export to CSV for BI tools / dashboards).
+- **`ledger.sh`** bash helper exposing `attest_log`, `attest_session_id`, `attest_summary`, `attest_rebuild_index` functions for scripts and hooks to call without invoking Python directly.
+- **`HOW-TO-LOG.md`** central reference for command-specific logging patterns. Each command's prompt has a short ~3-line reference block pointing to this doc (progressive disclosure — keeps individual commands compact).
+- **All seven commands** now log to the ledger: session_start at entry, session_end at exit with outcome (completed / blocked / abandoned), and command-specific intermediate events (artifact_created, drift_detected, decision_logged, verification_ran, subagent_spawned, subagent_completed).
+- **Pre-commit hook** logs `gate_passed` and `gate_blocked` events when the ledger is installed. Best-effort; never breaks the hook if logging fails.
+- **12 known event types** covering the full attest lifecycle. Unknown event types are stored raw in JSONL but skipped from the specialised SQLite tables (forward-compatibility).
+- **install.sh** creates `.attest/ledger/` in the target repo, installs the three ledger files, and appends the SQLite index files to .gitignore.
+
+**Critique 2 closed: `/ship` orchestrator.**
+
+- **New: `/ship <spec>` command.** Orchestrates a full-stack spec end-to-end in a single invocation:
+  1. Stage 1: runs `/contract` directly (cheap, deterministic)
+  2. Stage 2: spawns two Task subagents in parallel — one running `/work --scope backend`, one running `/work --scope frontend` — each in an isolated context window
+  3. Stage 3: runs `/check` to verify combined drift state
+  4. Stage 4: reports combined outcome to the user
+- Subagents inherit `parent_session_id` for ledger correlation, so the JSONL captures the full parent → children → completion tree.
+- Discipline preserved: `/ship` does NOT commit code, does NOT promote spec status beyond `contract-locked`, does NOT retry failed subagents, and does NOT spawn more than two subagents (scope explosion mitigates parallelism gain).
+- Refuses gracefully when the spec is not full-stack, when "Open questions" are unresolved, or when the Contract surface is empty.
+
+### Why now
+The Critique 1 review identified observability as attest's biggest gap relative to leading-org practice (LangSmith, Arize Phoenix, MLflow patterns) and the MAS AIRG inventory requirement. Critique 2 identified `/ship`-style orchestration as the productivity baseline established by Stripe (10K-line migration in 4 days), Wiz (50K-line library in 20 hours), Rakuten (24→5 day cycle). Both gaps are now closed.
+
+### Migration from v0.6.x
+- Re-run `./scripts/install.sh /path/to/your/repo` to install the ledger and the `/ship` command.
+- The ledger starts logging on the next slash command invocation; previous activity is not retroactively reconstructed.
+- The pre-commit hook is backward-compatible: if `.attest/ledger/` doesn't exist, the hook works as before with no logging.
+- Existing specs, fixes, and investigations are unaffected.
+
 ### Added
 - **New command: `/investigate`**. Structured investigation of failures (compile errors, runtime errors, test failures, broken CI, production incidents). Produces an investigation file under `investigations/` capturing observed symptoms, reproduction steps, hypotheses, ruled-out causes, evidence, and the root cause once found. The investigation file feeds into `/fix` via the new `--from-investigation` flag.
 - **`/fix --from-investigation <file>` flag.** Pre-populates the fix file's "What was wrong" and "Root cause" sections from a completed investigation. Refuses to run if the investigation status is not `root-cause-identified`.

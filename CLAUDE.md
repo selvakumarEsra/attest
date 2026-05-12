@@ -35,17 +35,40 @@ The attest workflow distribution repo. Holds the canonical source of the slash c
 - Markdown formatting: keep lines under ~100 chars where natural; don't reformat existing content just to "neaten" it.
 - Shell scripts use `set -euo pipefail` and are tested before commit.
 
+## Recommended model per command
+
+Each attest slash command has a `recommended-model` frontmatter field. The split:
+
+| Command             | Recommended |
+|---------------------|-------------|
+| `/spec`             | sonnet      |
+| `/contract`         | sonnet      |
+| `/work`             | opus        |
+| `/ship`             | opus        |
+| `/check`            | sonnet      |
+| `/fix`              | opus        |
+| `/investigate`      | opus        |
+| `/encode-lesson`    | opus        |
+| `/review-decisions` | sonnet      |
+
+Advisory, not enforced. Claude Code uses whatever model the user has selected. The ledger captures the model used per session for divergence analysis.
+
 ## How to verify work is done
 
 - `./scripts/verify-sync.sh` passes (`.claude/` matches `dist/`)
 - `bash -n dist/hooks/pre-commit` — no syntax errors
-- `bash -n scripts/install.sh scripts/sync-local.sh scripts/verify-sync.sh` — no syntax errors
+- `bash -n scripts/install.sh scripts/sync-local.sh scripts/verify-sync.sh dist/contract/breaking-change-check.sh` — no syntax errors
 - `python3 dist/commands/contract_hash.py dist/commands/test-fixtures/spec-before.md` and `...spec-after.md` produce identical output (hash mechanism invariant)
+- `python3 dist/ledger/attest_ledger.py log session_start command='"smoke"' --quiet && python3 dist/ledger/attest_ledger.py rebuild-index` — ledger smoke test
+- `python3 -c "import py_compile; py_compile.compile('dist/contract/breaking-change-fallback.py', doraise=True)"` — breaking-change detector syntax
 - All `*.md` files under `dist/` and `docs/` parse as well-formed markdown (no broken links to non-existent reference files)
 
 ## Where things live
 
 - `dist/` — installable artifacts (source of truth)
+- `dist/commands/` — eight slash command prompts
+- `dist/contract/` — breaking-change detection helpers (bash + Python fallback)
+- `dist/ledger/` — observability ledger (attest_ledger.py, ledger.sh, HOW-TO-LOG.md)
 - `.claude/` — generated local copy, synced from `dist/`
 - `docs/` — user-facing workflow documentation
 - `examples/` — worked example specs and fixes
