@@ -10,7 +10,7 @@ You are executing work defined by either a spec file (`specs/*.md`) or a fix fil
 
 ## Observability ledger
 
-This command logs to the attest ledger. Follow the patterns in `.attest/ledger/HOW-TO-LOG.md` — specifically the **"work command"** section. Logging is best-effort and silent. Generate a session UUID at the start and include the scope. Log drift_detected for each /check finding, verification_ran for each test invocation, and session_end with completion outcome. **If a parent_session_id was passed in $ARGUMENTS (i.e., this /work was spawned by /ship), include it in session_start so the ledger can correlate parent and child.**
+This command logs to the attest ledger. Follow the patterns in `.attest/ledger/HOW-TO-LOG.md` — specifically the **"work command"** section. Logging is best-effort and silent. Generate a session UUID at the start and include the scope. Log drift_detected for each /check finding, verification_ran for each test invocation, coverage_measured if CLAUDE.md declares a Coverage policy, and session_end with completion outcome. **If a parent_session_id was passed in $ARGUMENTS (i.e., this /work was spawned by /ship), include it in session_start so the ledger can correlate parent and child.**
 
 ### When to log a `decision_logged` event
 
@@ -192,6 +192,74 @@ Invoke `/check` with the working scope. This catches:
 - Code-implies-spec divergence (cheap version, only files we touched)
 
 If anything flags, surface it before marking ready-for-review.
+
+### Step 3.5: Coverage measurement (if CLAUDE.md declares a Coverage policy)
+
+Check whether CLAUDE.md contains a `## Coverage policy` section. If not, skip this step — the project hasn't opted in to coverage gating. If yes, this step is mandatory and its outcome can block status advancement.
+
+**Workflow:**
+
+1. **Run the project's coverage tool.** The exact command comes from the `**Tool**:` line in the Coverage policy section. Typical examples:
+   - Python: `pytest --cov=src --cov-report=json --cov-report=term`
+   - JavaScript/TypeScript: `npm test -- --coverage --coverageReporters=lcov`
+   - Go: `go test -coverprofile=coverage.out ./... && gocov convert coverage.out > coverage.json`
+
+2. **Run the coverage checker:**
+
+   ```bash
+   COV_RESULT=$(python3 .attest/coverage/coverage-check.py --base origin/main)
+   COV_PASSED=$(echo "$COV_RESULT" | python3 -c "import sys, json; print(json.load(sys.stdin)['passed'])")
+   ```
+
+   The checker reads the policy from CLAUDE.md, parses the coverage report, computes **delta coverage** (coverage of lines this session changed), and returns structured JSON.
+
+3. **Log the measurement to the ledger** regardless of outcome:
+
+   ```bash
+   log coverage_measured session_id="\"$SID\"" \
+       artifact="\"$ARTIFACT_PATH\"" \
+       tool="\"<from result>\"" \
+       metric="\"line\"" \
+       line_pct=<from result> \
+       branch_pct=<from result or null> \
+       delta_pct=<from result> \
+       project_pct=<from result> \
+       files_measured=<from result> \
+       threshold_delta=<from result> \
+       threshold_project=<from result> \
+       passed=<from result> \
+       excluded_paths='[...]'
+   ```
+
+4. **If `passed == false`**: do NOT advance status to `ready-for-review` in Step 4. Instead:
+
+   - Surface the failure to the user with concrete detail. Format:
+     ```
+     Coverage below threshold.
+
+     Delta coverage:   75.0%  (threshold 90.0%)  ← gating
+     Project coverage: 82.5%  (floor     80.0%)
+
+     Lines you wrote that aren't covered by tests:
+
+       src/notif/service.py:
+         - lines 47, 48, 52 (the null-email branch in send_notification)
+
+       src/notif/repository.py:
+         - lines 31, 32 (the get-or-create path in find_by_user)
+
+     Suggestions:
+       - Add a test for send_notification with email=None
+       - Add a test for find_by_user when no existing row matches
+
+     Status stays in-progress. Re-run /work after adding tests, or commit
+     with --no-verify to bypass (bypass will be logged separately).
+     ```
+
+   - Status stays `in-progress`. The user fixes coverage and re-runs `/work`, or bypasses deliberately.
+   - DO NOT auto-generate the missing tests. Suggesting tests is helpful; writing them without the user's explicit instruction is the failure mode that turns coverage into ceremony. Tests that exist purely to lift a number poison the audit trail.
+
+5. **If the coverage checker errors** (no report found, tool failed to parse), surface the error and treat as `passed=false` for safety. Status does not advance.
 
 ### Step 4: Update artifact status
 

@@ -6,6 +6,40 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/
 
 ## [Unreleased]
 
+### Added — v0.10.0 (test coverage gate)
+
+**Coverage policy as a first-class invariant.**
+
+Test coverage is enforced as a three-gate pipeline that reuses attest's existing primitives. The gating metric is **delta coverage** (percentage of lines added or modified in this session that are covered by tests) — answering the audit-relevant question "did the AI-generated code come with adequate tests?". Project-wide coverage is tracked alongside as informational.
+
+- **New: `dist/coverage/coverage-check.py`** — measures and parses coverage reports. Reads policy from CLAUDE.md (`## Coverage policy` section), supports both coverage.py JSON and lcov formats, computes delta coverage by intersecting `git diff` line ranges with covered/uncovered lines from the report. Returns structured JSON for downstream consumers. Verified against 5 scenarios: below threshold, above threshold, no CLAUDE.md policy, missing report, lcov input — all classify correctly.
+
+- **`/work` post-flight Step 3.5** — runs the coverage check after drift detection, before status promotion. Logs `coverage_measured` to the ledger regardless of pass/fail. If delta coverage is below threshold, status stays `in-progress` and the user sees the specific uncovered lines (file:line detail) with concrete suggestions. **Does NOT auto-generate tests** — that's the failure mode that turns coverage into ceremony.
+
+- **Pre-commit hook coverage gate** — `_check_coverage_gate` helper that reads the most recent `coverage_measured` event from the ledger and blocks the commit if it failed. Soft block (`--no-verify` bypassable, bypasses logged). Runs `rebuild-index` first so the gate sees the latest events (adds ~200ms to commits with the policy active; no cost when CLAUDE.md doesn't declare a policy).
+
+- **New ledger event type: `coverage_measured`**. Projects into a new `coverage` table with columns for tool, metric (line/branch/both), line_pct, branch_pct, delta_pct, project_pct, files_measured, threshold_delta, threshold_project, passed, excluded_paths. Surfaced in the `summary` command output with a "Coverage measurements" block (pass/fail counts, averages) and a "Recent coverage failures" block (top 5 failures with timestamps and gap detail).
+
+- **CLAUDE.md template** has a new "Coverage policy" section with 7 fields: Metric, Threshold, Project floor, Tool, Report path, Excluded paths, Bypass policy. Removing this section from a project's CLAUDE.md disables coverage gating entirely (no enforcement, no warnings). The Excluded paths field defaults to `_generated/**, tests/**, migrations/**` so generated code and test code don't count toward the denominator.
+
+- **install.sh** detects whether CLAUDE.md declares a policy at install time and surfaces guidance accordingly. Coverage helper installs to `.attest/coverage/coverage-check.py` (executable). Step count went from 7 to 8.
+
+### Design notes (the explicit non-choices)
+
+A few decisions made deliberately rather than by default:
+
+- **Delta coverage gates, project coverage is informational.** A regulator's question is "did this AI-generated code come with adequate tests" — answered by delta. Many teams' CI gates on project (drop-from-baseline). attest captures both per measurement so the audit story remains coherent across the divergence.
+- **The pre-commit gate is bypassable.** Same `--no-verify` mechanism as the linkage gate. Consistency in a regulated workflow matters; inconsistent gate behavior creates its own audit risk. Bypasses are logged separately as `gate_bypassed` events.
+- **No auto-test-generation.** When coverage is below threshold, `/work` surfaces uncovered lines with concrete suggestions but does NOT write the tests. Tests-that-exist-purely-to-lift-a-number poison the audit trail; better to surface the gap and let humans (or a deliberate `/work` re-invocation) decide.
+- **No new coverage tool.** attest does not implement coverage measurement. It runs the team's existing tool (pytest --cov, jest --coverage, go test -coverprofile, etc.) and parses the output. The team's coverage configuration stays in the team's coverage tool config (.coveragerc, jest.config.js, etc.) — attest just declares the threshold and parses the result.
+- **The hook reads the ledger; it does NOT re-run coverage.** Re-running coverage inside a git hook would make commits painfully slow. The assumption is that `/work` or `/fix` measured coverage in its post-flight; the hook reads that recent measurement. If no measurement exists, the hook warns but allows (failing-safe, since the absence of measurement is a `/work` problem, not a commit-time problem). CI re-runs coverage authoritatively against a clean checkout.
+
+### Migration from v0.9.x
+
+- Re-run `./scripts/install.sh /path/to/your/repo` to install the coverage helper and the updated hook.
+- **Coverage gating is opt-in.** Existing projects without a `## Coverage policy` section in CLAUDE.md see zero change. To enable, add the section using the format in the new `CLAUDE.md.template`.
+- Existing ledger data is unaffected. The new `coverage` table is created on next `rebuild-index`; before any coverage events exist, it's empty.
+
 ### Added — v0.9.0 (human-in-loop review, model pinning, explicit scope)
 
 **Critique 4 closed: human-in-loop decision log.**

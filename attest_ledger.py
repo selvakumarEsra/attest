@@ -85,6 +85,7 @@ KNOWN_EVENT_TYPES = {
     "verification_ran",         # a test/lint command ran with its outcome
     "lesson_encoded",           # an invariant was added to CLAUDE.md / skill / command
     "breaking_change_detected", # /contract detected a structural breaking change
+    "coverage_measured",        # /work or /fix measured test coverage
 }
 
 
@@ -204,6 +205,28 @@ CREATE TABLE IF NOT EXISTS breaking_changes (
 );
 
 CREATE INDEX IF NOT EXISTS ix_breaking_ts ON breaking_changes(ts);
+
+CREATE TABLE IF NOT EXISTS coverage (
+    event_id          TEXT PRIMARY KEY,
+    ts                TEXT NOT NULL,
+    session_id        TEXT,
+    artifact          TEXT,
+    tool              TEXT,
+    metric            TEXT,             -- 'line' | 'branch' | 'both'
+    line_pct          REAL,
+    branch_pct        REAL,
+    delta_pct         REAL,             -- coverage of code changed in this session
+    project_pct       REAL,             -- overall project coverage after this session
+    files_measured    INTEGER,
+    threshold_delta   REAL,             -- the configured gating threshold
+    threshold_project REAL,             -- the configured project floor (informational)
+    passed            INTEGER,          -- 1 if delta_pct >= threshold_delta, else 0
+    excluded_paths    TEXT              -- JSON array of exclusion globs used
+);
+
+CREATE INDEX IF NOT EXISTS ix_coverage_ts ON coverage(ts);
+CREATE INDEX IF NOT EXISTS ix_coverage_artifact ON coverage(artifact);
+CREATE INDEX IF NOT EXISTS ix_coverage_passed ON coverage(passed);
 
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -333,6 +356,29 @@ def index_event(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
                 event.get("tool"),
                 1 if event.get("breaking") else 0,
                 event.get("findings_count") or 0,
+            ),
+        )
+    elif et == "coverage_measured":
+        conn.execute(
+            "INSERT OR REPLACE INTO coverage "
+            "(event_id, ts, session_id, artifact, tool, metric, "
+            " line_pct, branch_pct, delta_pct, project_pct, "
+            " files_measured, threshold_delta, threshold_project, "
+            " passed, excluded_paths) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                eid, ts, session_id, artifact,
+                event.get("tool"),
+                event.get("metric"),
+                event.get("line_pct"),
+                event.get("branch_pct"),
+                event.get("delta_pct"),
+                event.get("project_pct"),
+                event.get("files_measured") or 0,
+                event.get("threshold_delta"),
+                event.get("threshold_project"),
+                1 if event.get("passed") else 0,
+                json.dumps(event.get("excluded_paths") or []),
             ),
         )
 
@@ -526,6 +572,47 @@ def summary(since: str | None = None) -> str:
                 f"breaking={r['breaking_n'] or 0}"
             )
 
+    # Coverage measurements
+    rows = conn.execute(
+        "SELECT COUNT(*) AS n, "
+        "  SUM(CASE WHEN passed = 1 THEN 1 ELSE 0 END) AS passed_n, "
+        "  SUM(CASE WHEN passed = 0 THEN 1 ELSE 0 END) AS failed_n, "
+        "  AVG(delta_pct) AS avg_delta, "
+        "  AVG(project_pct) AS avg_project "
+        "FROM coverage"
+    ).fetchall()
+    if rows and rows[0]['n']:
+        r = rows[0]
+        lines.append("")
+        lines.append("Coverage measurements:")
+        lines.append(
+            f"  total: {r['n']}  passed: {r['passed_n'] or 0}  "
+            f"failed: {r['failed_n'] or 0}"
+        )
+        if r['avg_delta'] is not None:
+            lines.append(
+                f"  avg delta coverage:   {r['avg_delta']:.1f}%"
+            )
+        if r['avg_project'] is not None:
+            lines.append(
+                f"  avg project coverage: {r['avg_project']:.1f}%"
+            )
+
+    # Recent coverage failures (most useful for fixing)
+    rows = conn.execute(
+        "SELECT ts, artifact, delta_pct, threshold_delta, tool "
+        "FROM coverage WHERE passed = 0 "
+        "ORDER BY ts DESC LIMIT 5"
+    ).fetchall()
+    if rows:
+        lines.append("")
+        lines.append("Recent coverage failures:")
+        for r in rows:
+            lines.append(
+                f"  {r['ts']}  {r['artifact'] or '?'}  "
+                f"{r['delta_pct']:.1f}% < {r['threshold_delta']:.1f}%  ({r['tool']})"
+            )
+
     conn.close()
     return "\n".join(lines)
 
@@ -632,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
     ep.add_argument("output", help="output file path")
     ep.add_argument("--table", default="sessions",
                     choices=["sessions", "events", "artifacts", "decisions",
-                             "lessons", "breaking_changes"])
+                             "lessons", "breaking_changes", "coverage"])
     ep.set_defaults(func=cmd_export_csv)
 
     args = p.parse_args(argv)

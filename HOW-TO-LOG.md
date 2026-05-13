@@ -109,6 +109,24 @@ Events to log:
       command_run='"<e.g. pytest tests/>"' \
       passed=true
   ```
+- `coverage_measured` once, in post-flight, if CLAUDE.md declares a Coverage policy:
+  ```bash
+  log coverage_measured session_id="\"$SID\"" \
+      artifact='"<spec-or-fix-path>"' \
+      tool='"<from coverage-check output>"' \
+      metric='"line"' \
+      line_pct=<float> \
+      branch_pct=<float or null> \
+      delta_pct=<float> \
+      project_pct=<float> \
+      files_measured=<int> \
+      threshold_delta=<float> \
+      threshold_project=<float> \
+      passed=<true|false> \
+      excluded_paths='["_generated/**", "tests/**", ...]'
+  ```
+  Log this REGARDLESS of pass/fail outcome — the event records that a measurement was taken, which is itself the audit-relevant fact. If passed=false, /work must NOT advance status to ready-for-review.
+
 - `artifact_updated` when status advances (in-progress, ready-for-review)
 - `session_end` with outcome
 

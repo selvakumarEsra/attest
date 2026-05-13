@@ -120,6 +120,35 @@ The attest commands recommend models as follows:
 
 **This is advisory, not enforced.** Claude Code uses whatever model the user has selected at invocation time. The ledger records `model` and `recommended_model` on every session_start event so divergence is queryable. For regulated use, deviating from the recommendation is fine but the audit trail captures intent.
 
+## Coverage policy
+
+<!--
+Declare your project's test coverage requirements here. Removing this
+section disables coverage gating entirely. Leaving it in place enables
+gates in three locations:
+
+  1. /work post-flight — measures, refuses to advance status to
+     ready-for-review if delta coverage is below threshold
+  2. Pre-commit hook — reads the most recent coverage_measured event
+     from the ledger; blocks if it failed
+  3. CI — the authoritative re-measurement (your CI config, not attest)
+
+The gating metric is DELTA COVERAGE — the percentage of lines added or
+modified in this session that are covered by tests. Project-wide
+coverage is tracked alongside as informational only.
+
+Fill in your project's values. Strip the placeholder hints (the parts
+in square brackets) before committing.
+-->
+
+- **Metric**: line                              [e.g. `line` | `branch` | `both`]
+- **Threshold**: 90                             [e.g. `90` — delta coverage gate, as percentage]
+- **Project floor**: 80                         [e.g. `80` — overall coverage floor, informational]
+- **Tool**: pytest --cov=src --cov-report=json  [e.g. your project's coverage command]
+- **Report path**: coverage.json                [e.g. path where the tool writes its report]
+- **Excluded paths**: _generated/**, tests/**, migrations/**
+- **Bypass policy**: Use `git commit --no-verify` for infrastructure code with team-lead sign-off. All bypasses are logged separately in the ledger as `gate_bypassed` events. Review weekly via `python3 .attest/ledger/attest_ledger.py query "SELECT * FROM events WHERE event_type = 'gate_bypassed' ORDER BY ts DESC"`.
+
 ## How to verify work is done
 
 <!--
