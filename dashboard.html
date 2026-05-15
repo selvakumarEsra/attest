@@ -451,6 +451,69 @@ body {
 .verdict-rejected { background: var(--warning-bg); color: var(--warning); }
 .verdict-needs-redo { background: var(--danger-bg); color: var(--danger); }
 .verdict-pending { background: var(--neutral-bg); color: var(--neutral); }
+.verdict-approved { background: var(--success-bg); color: var(--success); }
+.verdict-changes-requested { background: var(--danger-bg); color: var(--danger); }
+
+/* Pending plan indicator — a small amber dot next to the Plans tab count */
+.pending-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  margin-left: 2px;
+  vertical-align: middle;
+}
+
+/* Pending-approvals top panel on L1 */
+.pending-panel {
+  background: var(--warning-bg);
+  border: 0.5px solid var(--warning);
+  border-radius: 8px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+.pending-panel h2 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--warning);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pending-panel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+  border-top: 0.5px solid color-mix(in srgb, var(--warning) 30%, transparent);
+}
+.pending-panel-row:first-of-type { border-top: none; }
+.pending-panel-row a {
+  color: var(--warning);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.pending-panel-row a:hover { text-decoration: underline; }
+.pending-panel-row .meta {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Pending pill on intent row */
+.intent-pending-pill {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-weight: 500;
+  margin-left: 4px;
+}
 
 .coverage-row {
   display: grid;
@@ -724,7 +787,8 @@ function buildIntentDetail(intent) {
   const directEvents = state.events.filter(e =>
     e.artifact === intent.path ||
     e.parent_artifact === intent.path ||
-    e.from_investigation === intent.path
+    e.from_investigation === intent.path ||
+    e.source_artifact === intent.path
   );
 
   // Collect related sessions (any session that touched this artifact)
@@ -771,6 +835,30 @@ function buildIntentDetail(intent) {
   // Lessons
   const lessons = events.filter(e => e.event_type === 'lesson_encoded');
 
+  // Plans for this intent — join plan_drafted (which has source_artifact)
+  // with plan_approved and plan_executing (which only carry plan_id).
+  // plan_approved/plan_executing don't have source_artifact, so we look them
+  // up across all state.events by plan_id.
+  const planDrafted = events.filter(e => e.event_type === 'plan_drafted' && e.source_artifact === intent.path);
+  const plans = planDrafted.map(d => {
+    const approved = state.events.find(e => e.event_type === 'plan_approved' && e.plan_id === d.plan_id);
+    const executing = state.events.find(e => e.event_type === 'plan_executing' && e.plan_id === d.plan_id);
+    return {
+      plan_id: d.plan_id,
+      scope: d.scope,
+      source_artifact: d.source_artifact,
+      plan_path: d.plan_path,
+      files_to_modify: d.files_to_modify || [],
+      estimated_decisions: d.estimated_decisions || 0,
+      drafted_at: d.ts,
+      verdict: approved ? approved.verdict : null,
+      reviewer_note: approved ? approved.reviewer_note : null,
+      reviewed_at: approved ? approved.ts : null,
+      executing_session: executing ? executing.session_id : null,
+      executed_at: executing ? executing.ts : null,
+    };
+  }).sort((a, b) => (a.drafted_at || '').localeCompare(b.drafted_at || ''));
+
   // Generated artifacts (e.g., _generated/openapi/...)
   const generated = Array.from(state.artifacts.values())
     .filter(a => a.parent_artifact === intent.path);
@@ -782,7 +870,7 @@ function buildIntentDetail(intent) {
   // Build the workflow stages — depends on kind
   const stages = buildStages(intent, events, sessions, generated, decisions);
 
-  return { intent, events, sessions, decisions, coverage, drift, lessons, generated, stages };
+  return { intent, events, sessions, decisions, coverage, drift, lessons, plans, generated, stages };
 }
 
 function buildStages(intent, events, sessions, generated, decisions) {
@@ -815,6 +903,31 @@ function buildStages(intent, events, sessions, generated, decisions) {
       substat: generated.length + ' artifact' + (generated.length !== 1 ? 's' : ''),
       complete: true,
       artifact: generated[0].path,
+    });
+  }
+
+  // Stage 3.5: plan approval (only if /ship was used — plan_drafted events exist for this intent)
+  const planDraftedEvents = events.filter(e => e.event_type === 'plan_drafted');
+  const planApprovedEvents = events.filter(e => e.event_type === 'plan_approved');
+  if (planDraftedEvents.length > 0) {
+    const approvedCount = planApprovedEvents.filter(e => e.verdict === 'approved').length;
+    const rejectedCount = planApprovedEvents.filter(e => e.verdict === 'rejected' || e.verdict === 'changes-requested').length;
+    const pendingCount = planDraftedEvents.length - planApprovedEvents.length;
+    let substat;
+    if (pendingCount > 0) {
+      substat = pendingCount + ' awaiting review';
+    } else if (rejectedCount > 0) {
+      substat = approvedCount + ' approved · ' + rejectedCount + ' rejected';
+    } else {
+      substat = approvedCount + ' of ' + planDraftedEvents.length + ' approved';
+    }
+    stages.push({
+      stage: 'plan review',
+      label: '/ship plans',
+      substat: substat,
+      complete: pendingCount === 0 && approvedCount > 0,
+      active: pendingCount > 0,
+      artifact: null,
     });
   }
 
@@ -951,6 +1064,20 @@ function computeSignals() {
     });
   }
 
+  // 7. /ship plans stuck waiting for approval
+  const planDrafted = state.events.filter(e => e.event_type === 'plan_drafted');
+  const planApproved = state.events.filter(e => e.event_type === 'plan_approved');
+  const planApprovedIds = new Set(planApproved.map(e => e.plan_id));
+  const pendingPlans = planDrafted.filter(e => !planApprovedIds.has(e.plan_id));
+  if (pendingPlans.length > 0) {
+    signals.push({
+      severity: pendingPlans.length >= 3 ? 'critical' : 'warn',
+      observation: pendingPlans.length + ' /ship plan' + (pendingPlans.length !== 1 ? 's' : '') +
+        ' drafted but not yet approved. /ship is paused waiting for your verdict.',
+      action: 'Return to the /ship session and approve or reject the pending plans. Each plan is under .attest/plans/<plan_id>.md.',
+    });
+  }
+
   return signals;
 }
 
@@ -1069,11 +1196,11 @@ function renderSignals() {
   `;
 }
 
-function renderIntentRow(intent) {
+function renderIntentRow(intent, hasPending) {
   const sel = state.selectedIntent === intent.path ? 'selected' : '';
   return `
     <div class="intent-row ${sel}" onclick="selectIntent('${intent.path}')">
-      <div class="intent-ticket">${escapeHtml(intent.ticket_id || filename(intent.path))}</div>
+      <div class="intent-ticket">${escapeHtml(intent.ticket_id || filename(intent.path))}${hasPending ? ' <span class="intent-pending-pill" title="plans awaiting approval">plan</span>' : ''}</div>
       <div class="intent-title">${escapeHtml(intent.title || filename(intent.path))}</div>
       <span class="kind-pill kind-${intent.kind}">${intent.kind}</span>
       <span class="status-badge status-${intent.status}">${escapeHtml(intent.status || '?')}</span>
@@ -1082,8 +1209,49 @@ function renderIntentRow(intent) {
   `;
 }
 
+function intentsWithPendingPlans() {
+  // For each intent, see if it has plan_drafted events without a matching plan_approved
+  const out = new Map(); // intent.path -> { intent, count }
+  for (const e of state.events) {
+    if (e.event_type !== 'plan_drafted') continue;
+    const intent = state.intents.find(i => i.path === e.source_artifact);
+    if (!intent) continue;
+    const approved = state.events.find(a => a.event_type === 'plan_approved' && a.plan_id === e.plan_id);
+    if (approved) continue;
+    if (!out.has(intent.path)) out.set(intent.path, { intent, plans: [] });
+    out.get(intent.path).plans.push(e);
+  }
+  return Array.from(out.values());
+}
+
+function renderPendingApprovals() {
+  const pending = intentsWithPendingPlans();
+  if (pending.length === 0) return '';
+  return `
+    <div class="pending-panel">
+      <h2>Plans awaiting your approval <span style="font-size: 11px; color: var(--text-secondary); font-weight: normal;">return to your /ship session to approve or reject</span></h2>
+      ${pending.map(p => {
+        const scopes = p.plans.map(x => x.scope).filter(Boolean);
+        const planList = p.plans.length;
+        return `
+          <div class="pending-panel-row">
+            <div>
+              <a onclick="selectIntent('${escapeHtml(p.intent.path)}')">${escapeHtml(p.intent.ticket_id || filename(p.intent.path))}</a>
+              <span style="font-size: 12px; color: var(--text-secondary); margin-left: 8px;">${escapeHtml(p.intent.title || '')}</span>
+            </div>
+            <div class="meta">
+              ${planList} plan${planList !== 1 ? 's' : ''} · ${scopes.length ? scopes.join(' + ') : '?'}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function renderL1() {
   const m = computeMetrics();
+  const pendingPaths = new Set(intentsWithPendingPlans().map(p => p.intent.path));
   const filtered = state.intents.filter(i => {
     if (state.filter === 'all') return true;
     if (state.filter === 'active') return ['in-progress', 'signed-off', 'contract-locked', 'ready-for-review', 'open', 'root-cause-identified', 'draft'].includes(i.status);
@@ -1091,25 +1259,27 @@ function renderL1() {
     if (state.filter === 'spec') return i.kind === 'spec';
     if (state.filter === 'fix') return i.kind === 'fix';
     if (state.filter === 'investigation') return i.kind === 'investigation';
+    if (state.filter === 'pending-approval') return pendingPaths.has(i.path);
     return true;
   });
 
   return `
     ${renderMetricsRow(m)}
+    ${renderPendingApprovals()}
     ${renderSignals()}
     <div class="layout">
       <div class="intents-list">
         <div class="intents-toolbar">
           <div>${filtered.length} of ${state.intents.length} intents</div>
           <div class="filters">
-            ${['all', 'active', 'done', 'spec', 'fix', 'investigation'].map(f => `
-              <button class="filter-chip ${state.filter === f ? 'active' : ''}" onclick="setFilter('${f}')">${f}</button>
+            ${['all', 'active', 'done', 'pending-approval', 'spec', 'fix', 'investigation'].map(f => `
+              <button class="filter-chip ${state.filter === f ? 'active' : ''}" onclick="setFilter('${f}')">${f}${f === 'pending-approval' && pendingPaths.size > 0 ? ' <span class="count" style="margin-left: 4px;">' + pendingPaths.size + '</span>' : ''}</button>
             `).join('')}
           </div>
         </div>
         ${filtered.length === 0 ?
           '<div style="padding: 40px; text-align: center; color: var(--text-tertiary);">No intents match this filter.</div>' :
-          filtered.map(renderIntentRow).join('')
+          filtered.map(i => renderIntentRow(i, pendingPaths.has(i.path))).join('')
         }
       </div>
     </div>
@@ -1164,6 +1334,7 @@ function renderL2() {
       <div class="tabs">
         <div class="tab-bar">
           <button class="tab active" data-tab="decisions">Decisions <span class="count">${d.decisions.length}</span></button>
+          <button class="tab" data-tab="plans">Plans <span class="count">${d.plans.length}</span>${d.plans.some(p => !p.verdict) ? ' <span class="pending-dot" title="awaiting approval"></span>' : ''}</button>
           <button class="tab" data-tab="coverage">Coverage <span class="count">${d.coverage.length}</span></button>
           <button class="tab" data-tab="drift">Drift <span class="count">${d.drift.length}</span></button>
           <button class="tab" data-tab="lessons">Lessons <span class="count">${d.lessons.length}</span></button>
@@ -1238,6 +1409,35 @@ function renderLessonsTab(lessons) {
       </div>
     </div>
   `).join('');
+}
+
+function renderPlansTab(plans) {
+  if (plans.length === 0) {
+    return '<div class="tab-empty">No /ship plans drafted for this intent. (Plans appear only when /ship is used; direct /work invocations approve their plan inline and do not emit plan_drafted events.)</div>';
+  }
+  return plans.map(p => {
+    const verdict = p.verdict || 'pending';
+    const verdictClass = 'verdict-' + verdict.replace(/[^a-z-]/g, '-');
+    const fileCount = (p.files_to_modify || []).length;
+    const filesPreview = fileCount === 0 ? '(no files listed)' :
+      fileCount <= 3
+        ? p.files_to_modify.map(escapeHtml).join(', ')
+        : p.files_to_modify.slice(0, 3).map(escapeHtml).join(', ') + ' and ' + (fileCount - 3) + ' more';
+    return `
+      <div class="decision">
+        <div style="display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px;">
+          <span style="font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);">${escapeHtml(p.scope || '?')}</span>
+          <span class="decision-verdict ${verdictClass}">${escapeHtml(verdict)}</span>
+          <span style="font-size: 11px; color: var(--text-tertiary);">drafted ${formatDate(p.drafted_at)}</span>
+          ${p.executed_at ? `<span style="font-size: 11px; color: var(--text-tertiary);">· executed ${formatDate(p.executed_at)}</span>` : ''}
+        </div>
+        <div style="font-size: 13px; margin-bottom: 4px;">${fileCount} file${fileCount !== 1 ? 's' : ''} · ${p.estimated_decisions || 0} decision${p.estimated_decisions !== 1 ? 's' : ''} expected</div>
+        <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">${escapeHtml(filesPreview)}</div>
+        ${p.reviewer_note ? `<div style="font-size: 12px; color: var(--text-tertiary); font-style: italic; margin-top: 4px;">reviewer note: ${escapeHtml(p.reviewer_note)}</div>` : ''}
+        ${p.plan_path ? `<div style="font-size: 11px; color: var(--text-tertiary); margin-top: 4px;"><a href="#" onclick="viewArtifact('${escapeHtml(p.plan_path)}'); return false;" style="font-family: var(--font-mono);">${escapeHtml(p.plan_path)}</a></div>` : ''}
+      </div>
+    `;
+  }).join('');
 }
 
 function renderClaudeTab() {
@@ -1382,6 +1582,7 @@ function bindTabs() {
       const c = document.getElementById('tab-content');
       const tab = t.dataset.tab;
       if (tab === 'decisions') c.innerHTML = renderDecisionsTab(d.decisions);
+      else if (tab === 'plans') c.innerHTML = renderPlansTab(d.plans);
       else if (tab === 'coverage') c.innerHTML = renderCoverageTab(d.coverage);
       else if (tab === 'drift') c.innerHTML = renderDriftTab(d.drift);
       else if (tab === 'lessons') c.innerHTML = renderLessonsTab(d.lessons);
